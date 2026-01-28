@@ -1,26 +1,26 @@
 # Game Mounter
 **By Manos**
 
-Αυτόματο mounting όλων των games από το `/data/etaHEN/games/` στο PS5 home screen.
+Automatically mount all games from `/data/etaHEN/games/` to the PS5 home screen.
 
 ---
 
-## 🎯 Τι Κάνει
+## 🎯 What It Does
 
-Το payload σκανάρει όλους τους φακέλους μέσα στο `/data/etaHEN/games/` και για κάθε game:
+The payload scans all folders inside `/data/etaHEN/games/` and for each game:
 
-1. **Διαβάζει το Title ID** από το `param.json` ή `param.sfo`
-2. **Κάνει patch το DRM** (αλλάζει `applicationDrmType` σε `standard`)
-3. **Κάνει nullfs mount** στο `/system_ex/app/[TITLE_ID]`
-4. **Αντιγράφει metadata** (icons, sounds) στο `/user/app/` και `/user/appmeta/`
-5. **Καταχωρεί το game** στο PS5 system database
-6. **Εμφανίζει το icon** στο home screen
+1. **Reads the Title ID** from `param.json` or `param.sfo`
+2. **Patches the DRM** (changes `applicationDrmType` to `standard`)
+3. **Creates nullfs mount** to `/system_ex/app/[TITLE_ID]`
+4. **Copies metadata** (icons, sounds) to `/user/app/` and `/user/appmeta/`
+5. **Registers the game** in the PS5 system database
+6. **Displays the icon** on the home screen
 
 ---
 
-## 📂 Δομή Φακέλων
+## 📂 Folder Structure
 
-Τα games πρέπει να είναι οργανωμένα έτσι:
+Games must be organized like this:
 
 ```
 /data/etaHEN/games/
@@ -42,7 +42,7 @@
 
 ---
 
-## 🚀 Χρήση
+## 🚀 Usage
 
 ### Compilation (Linux):
 
@@ -60,56 +60,55 @@
     main.cpp
 ```
 
-Ή χρησιμοποίησε το build script:
+Or use the build script:
 ```bash
 bash build.sh
 ```
 
-### Εκτέλεση στο PS5:
+### Running on PS5:
 
-1. Στείλε το `game_mounter.elf` στο PS5 (π.χ. στο `/data/etaHEN/payloads/`)
-2. Εκτέλεσε το payload από το etaHEN menu
-3. Περίμενε να ολοκληρωθεί το mounting (θα δεις notification "Game Mounter - By Manos")
-4. Τα games θα εμφανιστούν στο home screen!
-
----
-
-## ⚙️ Τεχνικές Λεπτομέρειες
-
-- **Nullfs Mount**: Δεν αντιγράφει τα games, απλά τα "mirror" - άμεση πρόσβαση
-- **DRM Bypass**: Αλλάζει το `applicationDrmType` για να τρέξουν χωρίς license
-- **System Registration**: Χρησιμοποιεί `sceAppInstUtilAppInstallTitleDir()` API
-- **Database Update**: Ενημερώνει το `/system_data/priv/mms/app.db` για sounds
+1. Send `game_mounter.elf` to PS5 (e.g. to `/data/etaHEN/payloads/`)
+2. Execute the payload from etaHEN menu
+3. Wait for mounting to complete (you'll see notification "Game Mounter - By Manos")
+4. Games will appear on the home screen!
 
 ---
 
-## 📝 Σημειώσεις
+## ⚙️ Technical Details
 
-- Υποστηρίζει **PS5 games** (param.json) και **PS4 games** (param.sfo)
-- Αν ένα game είναι ήδη mounted, το unmount και το ξαναμουντάρει
-- Εμφανίζει detailed output στο console για debugging
-- Στέλνει PS5 notifications για την πρόοδο
+- **Nullfs Mount**: Doesn't copy games, just mirrors them - direct access
+- **DRM Bypass**: Changes `applicationDrmType` to run without license
+- **System Registration**: Uses `sceAppInstUtilAppInstallTitleDir()` API
+- **Database Update**: Updates `/system_data/priv/mms/app.db` for sounds
+
+---
+
+## 📝 Notes
+
+- Supports **PS5 games** (param.json and param.sfo)
+- If a game is already mounted, it will unmount and remount it
+- Displays detailed console output for debugging
+- Sends PS5 notifications for progress updates
 
 ---
 
 ## 🔧 Troubleshooting
 
-**Δεν εμφανίζονται τα games:**
-- Έλεγξε ότι υπάρχει το `/data/etaHEN/games/` directory
-- Έλεγξε ότι κάθε game έχει `sce_sys/param.json` ή `sce_sys/param.sfo`
-- Κοίταξε το console output για errors
+**Games not showing up:**
+- Check that `/data/etaHEN/games/` directory exists
+- Check that each game has `sce_sys/param.json` or `sce_sys/param.sfo`
+- Look at console output for errors
 
 **"Registration failed" error:**
-- Το PS5 system database μπορεί να είναι locked
-- Δοκίμασε να κλείσεις άλλα games/apps πριν τρέξεις το payload
+- PS5 system database may be locked
+- Try closing other games/apps before running the payload
 
 ---
 
 ## 📄 Credits & License
 
 **Created by:** Manos  
-**Based on:** dump_runner by John Törnblom  
-**SDK:** PS5 Payload SDK
+**SDK:** PS5 Payload SDK by John Törnblom
 
 ---
 
@@ -117,7 +116,7 @@ bash build.sh
 
 - ✅ Automatic game detection and mounting
 - ✅ DRM bypass for all games
-- ✅ PS5 and PS4 game support
+- ✅ PS5 game support
 - ✅ Nullfs mounting (no file copying needed)
 - ✅ PS5 notifications for progress
 - ✅ Detailed console output for debugging

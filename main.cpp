@@ -825,24 +825,25 @@ int main(void) {
                  "No games found\n\nScanned locations:");
     }
     
-    // Add location scan results to notification
+    // Add location scan results to notification with descriptive names
+    const char* location_names[] = {
+        "Internal",
+        "USB0",
+        "USB1",
+        "USB2",
+        "USB3",
+        "M.2 SSD"
+    };
+    
     for (int i = 0; i < (int)NUM_GAME_PATHS; i++) {
         struct stat st;
+        char line[128];
         if (stat(GAME_PATHS[i], &st) == 0 && S_ISDIR(st.st_mode)) {
-            char line[128];
-            const char* short_name = strrchr(GAME_PATHS[i], '/');
-            if (!short_name) short_name = GAME_PATHS[i];
-            else short_name++;
-            snprintf(line, sizeof(line), "\n✅ %s", short_name);
-            strcat(notification_msg, line);
+            snprintf(line, sizeof(line), "\n✅ %s", location_names[i]);
         } else {
-            char line[128];
-            const char* short_name = strrchr(GAME_PATHS[i], '/');
-            if (!short_name) short_name = GAME_PATHS[i];
-            else short_name++;
-            snprintf(line, sizeof(line), "\n❌ %s", short_name);
-            strcat(notification_msg, line);
+            snprintf(line, sizeof(line), "\n❌ %s", location_names[i]);
         }
+        strcat(notification_msg, line);
     }
     
     notify("%s", notification_msg);

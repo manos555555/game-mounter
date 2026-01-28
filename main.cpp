@@ -18,7 +18,16 @@
 #define IOVEC_ENTRY(x) { (void*)(x), (x) ? strlen(x) + 1 : 0 }
 #define IOVEC_SIZE(x)  (sizeof(x) / sizeof(struct iovec))
 
-#define GAMES_BASE_PATH "/data/etaHEN/games"
+// Supported game paths - internal, USB drives, and M.2 SSD
+static const char* GAME_PATHS[] = {
+    "/data/etaHEN/games",    // Internal etaHEN storage
+    "/mnt/usb0/games",       // USB drive 0
+    "/mnt/usb1/games",       // USB drive 1  
+    "/mnt/usb2/games",       // USB drive 2
+    "/mnt/usb3/games",       // USB drive 3
+    "/mnt/ext0/games",       // M.2 SSD
+};
+#define NUM_GAME_PATHS (sizeof(GAME_PATHS) / sizeof(GAME_PATHS[0]))
 
 typedef struct notify_request {
     char unused[45];
@@ -704,15 +713,8 @@ int main(void) {
     notify("Game Mounter\nBy Manos");
     printf("===========================================\n");
     printf("  Game Mounter - By Manos\n");
-    printf("  Mounting games from: %s\n", GAMES_BASE_PATH);
+    printf("  Scanning multiple locations for games\n");
     printf("===========================================\n");
-
-    struct stat st;
-    if (stat(GAMES_BASE_PATH, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        notify("Error: %s not found!", GAMES_BASE_PATH);
-        printf("Error: %s does not exist or is not a directory\n", GAMES_BASE_PATH);
-        return -1;
-    }
 
     remount_system_ex();
     printf("[OK] Remounted /system_ex\n");
@@ -723,70 +725,95 @@ int main(void) {
     int cleaned = auto_unmount_deleted_games();
 
     printf("\n=== Scanning for games ===\n");
-    
-    DIR* d = opendir(GAMES_BASE_PATH);
-    if (!d) {
-        notify("Error: Cannot open %s", GAMES_BASE_PATH);
-        printf("Error: Cannot open %s\n", GAMES_BASE_PATH);
-        return -1;
-    }
 
-    int mounted_count = 0;
-    int skipped_count = 0;
-    int failed_count = 0;
-    struct dirent* e;
-    char game_path[PATH_MAX];
+    int total_mounted = 0;
+    int total_skipped = 0;
+    int total_failed = 0;
     
     // Store mounted game names for notification
     char mounted_games[10][256];  // Store up to 10 game names
     int stored_names = 0;
-
-    while ((e = readdir(d))) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+    
+    // Scan all configured paths
+    for (int path_idx = 0; path_idx < (int)NUM_GAME_PATHS; path_idx++) {
+        const char* base_path = GAME_PATHS[path_idx];
+        struct stat st;
+        
+        // Check if path exists
+        if (stat(base_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            printf("  [%d/%d] Skipping %s (not found)\n", path_idx + 1, (int)NUM_GAME_PATHS, base_path);
             continue;
-
-        snprintf(game_path, sizeof(game_path), "%s/%s", GAMES_BASE_PATH, e->d_name);
-
-        if (stat(game_path, &st) != 0 || !S_ISDIR(st.st_mode))
-            continue;
-
-        char game_name[256] = {};
-        int result = process_game(game_path, game_name, sizeof(game_name));
-        if (result == 0) {
-            // Successfully mounted
-            if (stored_names < 10) {
-                snprintf(mounted_games[stored_names], sizeof(mounted_games[0]), "%s", game_name);
-                stored_names++;
-            }
-            mounted_count++;
-        } else if (result == 2) {
-            skipped_count++;
-        } else {
-            failed_count++;
         }
-    }
+        
+        printf("  [%d/%d] Scanning: %s\n", path_idx + 1, (int)NUM_GAME_PATHS, base_path);
+        
+        DIR* d = opendir(base_path);
+        if (!d) {
+            printf("  Warning: Cannot open %s\n", base_path);
+            continue;
+        }
+        
+        int mounted_count = 0;
+        int skipped_count = 0;
+        int failed_count = 0;
+        
+        struct dirent* e;
+        while ((e = readdir(d))) {
+            char game_path[PATH_MAX];
+            
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+                continue;
 
-    closedir(d);
+            snprintf(game_path, sizeof(game_path), "%s/%s", base_path, e->d_name);
+
+            if (stat(game_path, &st) != 0 || !S_ISDIR(st.st_mode))
+                continue;
+
+            char game_name[256] = {};
+            int result = process_game(game_path, game_name, sizeof(game_name));
+            if (result == 0) {
+                // Successfully mounted
+                if (stored_names < 10) {
+                    snprintf(mounted_games[stored_names], sizeof(mounted_games[0]), "%s", game_name);
+                    stored_names++;
+                }
+                mounted_count++;
+            } else if (result == 2) {
+                skipped_count++;
+            } else {
+                failed_count++;
+            }
+        }
+
+        closedir(d);
+        
+        printf("    Mounted: %d | Skipped: %d | Failed: %d\n", 
+               mounted_count, skipped_count, failed_count);
+        
+        total_mounted += mounted_count;
+        total_skipped += skipped_count;
+        total_failed += failed_count;
+    }
 
     printf("\n===========================================\n");
     printf("  SUMMARY\n");
     if (cleaned > 0) {
         printf("  Cleaned up: %d deleted game(s)\n", cleaned);
     }
-    printf("  New mounts: %d games\n", mounted_count);
-    if (mounted_count > 0 && stored_names > 0) {
+    printf("  New mounts: %d games\n", total_mounted);
+    if (total_mounted > 0 && stored_names > 0) {
         printf("  Mounted games:\n");
         for (int i = 0; i < stored_names; i++) {
             printf("    - %s\n", mounted_games[i]);
         }
     }
-    printf("  Already mounted: %d games\n", skipped_count);
-    printf("  Failed: %d games\n", failed_count);
-    printf("  Total active: %d games\n", mounted_count + skipped_count);
+    printf("  Already mounted: %d games\n", total_skipped);
+    printf("  Failed: %d games\n", total_failed);
+    printf("  Total active: %d games\n", total_mounted + total_skipped);
     printf("===========================================\n");
 
-    if (mounted_count > 0) {
-        if (stored_names > 0 && stored_names == mounted_count) {
+    if (total_mounted > 0) {
+        if (stored_names > 0 && stored_names == total_mounted) {
             // Show game names (up to 10 games)
             char msg[2048] = "Mounted:\n";
             for (int i = 0; i < stored_names; i++) {
@@ -795,12 +822,12 @@ int main(void) {
             }
             notify("%s", msg);
         } else {
-            notify("Success! Mounted %d new game(s)", mounted_count);
+            notify("Success! Mounted %d new game(s)", total_mounted);
         }
-    } else if (skipped_count > 0) {
-        notify("All %d game(s) already mounted", skipped_count);
+    } else if (total_skipped > 0) {
+        notify("All %d game(s) already mounted", total_skipped);
     } else {
-        notify("No games were mounted. Check console output.");
+        notify("No games found. Check console output.");
     }
 
     return 0;

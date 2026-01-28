@@ -1,7 +1,15 @@
 # Game Mounter
 **By Manos**
 
-Automatically mount all games from `/data/etaHEN/games/` to the PS5 home screen.
+Automatically mount all games from multiple locations to the PS5 home screen.
+
+**Supported Locations:**
+- `/data/etaHEN/games` - Internal storage
+- `/mnt/usb0/games` - USB drive 0
+- `/mnt/usb1/games` - USB drive 1
+- `/mnt/usb2/games` - USB drive 2
+- `/mnt/usb3/games` - USB drive 3
+- `/mnt/ext0/games` - M.2 SSD
 
 ---
 
@@ -20,18 +28,18 @@ The payload scans all folders inside `/data/etaHEN/games/` and for each game:
 
 ## 📂 Folder Structure
 
-Games must be organized like this:
+Games can be stored in any of the supported locations. Organize them like this:
 
 ```
-/data/etaHEN/games/
+/data/etaHEN/games/  (or /mnt/usb0/games, /mnt/ext0/games, etc.)
 ├── GameName1/
 │   ├── sce_sys/
-│   │   ├── param.json (ή param.sfo)
+│   │   ├── param.json (or param.sfo)
 │   │   ├── icon0.png
 │   │   ├── pic0.png
 │   │   └── ...
 │   ├── eboot.bin
-│   └── [άλλα αρχεία game]
+│   └── [other game files]
 ├── GameName2/
 │   ├── sce_sys/
 │   │   └── ...
@@ -85,19 +93,22 @@ bash build.sh
 
 ## 📝 Notes
 
+- Automatically scans **all available locations** (internal, USB, M.2)
 - Supports **PS5 games** (param.json and param.sfo)
 - If a game is already mounted, it will unmount and remount it
 - Displays detailed console output for debugging
 - Sends PS5 notifications for progress updates
+- Only mounts from locations that exist (skips unavailable drives)
 
 ---
 
 ## 🔧 Troubleshooting
 
 **Games not showing up:**
-- Check that `/data/etaHEN/games/` directory exists
+- Check that at least one game directory exists (e.g., `/data/etaHEN/games/`, `/mnt/usb0/games/`, `/mnt/ext0/games/`)
 - Check that each game has `sce_sys/param.json` or `sce_sys/param.sfo`
-- Look at console output for errors
+- Look at console output to see which locations were scanned
+- USB drives must be mounted before running the payload
 
 **"Registration failed" error:**
 - PS5 system database may be locked
@@ -114,6 +125,7 @@ bash build.sh
 
 ## 🌟 Features
 
+- ✅ **Multi-location support** - Scans internal, USB drives, and M.2 SSD
 - ✅ Automatic game detection and mounting
 - ✅ DRM bypass for all games
 - ✅ PS5 game support

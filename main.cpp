@@ -811,6 +811,41 @@ int main(void) {
     printf("  Failed: %d games\n", total_failed);
     printf("  Total active: %d games\n", total_mounted + total_skipped);
     printf("===========================================\n");
+    
+    // Build detailed notification with scan results
+    char notification_msg[2048];
+    if (total_mounted > 0) {
+        snprintf(notification_msg, sizeof(notification_msg), 
+                 "Mounted %d new game(s)\n\nScanned locations:", total_mounted);
+    } else if (total_skipped > 0) {
+        snprintf(notification_msg, sizeof(notification_msg), 
+                 "All %d game(s) already mounted\n\nScanned locations:", total_skipped);
+    } else {
+        snprintf(notification_msg, sizeof(notification_msg), 
+                 "No games found\n\nScanned locations:");
+    }
+    
+    // Add location scan results to notification
+    for (int i = 0; i < (int)NUM_GAME_PATHS; i++) {
+        struct stat st;
+        if (stat(GAME_PATHS[i], &st) == 0 && S_ISDIR(st.st_mode)) {
+            char line[128];
+            const char* short_name = strrchr(GAME_PATHS[i], '/');
+            if (!short_name) short_name = GAME_PATHS[i];
+            else short_name++;
+            snprintf(line, sizeof(line), "\n✅ %s", short_name);
+            strcat(notification_msg, line);
+        } else {
+            char line[128];
+            const char* short_name = strrchr(GAME_PATHS[i], '/');
+            if (!short_name) short_name = GAME_PATHS[i];
+            else short_name++;
+            snprintf(line, sizeof(line), "\n❌ %s", short_name);
+            strcat(notification_msg, line);
+        }
+    }
+    
+    notify("%s", notification_msg);
 
     if (total_mounted > 0) {
         if (stored_names > 0 && stored_names == total_mounted) {

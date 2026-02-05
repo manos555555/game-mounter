@@ -13,7 +13,12 @@
 #include <limits.h>
 #include <sys/uio.h>
 #include <fcntl.h>
+#include <time.h>
 // #include <sqlite3.h>  // Not available in SDK, sound info update is optional
+
+// Log file path
+#define LOG_FILE "/data/etaHEN/game_mounter.log"
+#define CACHE_FILE "/data/etaHEN/game_cache.json"
 
 #define IOVEC_ENTRY(x) { (void*)(x), (x) ? strlen(x) + 1 : 0 }
 #define IOVEC_SIZE(x)  (sizeof(x) / sizeof(struct iovec))
@@ -40,12 +45,50 @@ extern "C" {
     int sceKernelSendNotificationRequest(int, notify_request_t*, size_t, int);
 }
 
+// ---------------- LOGGING ----------------
+static FILE* log_file = NULL;
+
+static void log_init(void) {
+    log_file = fopen(LOG_FILE, "a");
+    if (log_file) {
+        time_t now = time(NULL);
+        fprintf(log_file, "\n=== Game Mounter Started: %s", ctime(&now));
+        fflush(log_file);
+    }
+}
+
+static void log_close(void) {
+    if (log_file) {
+        fclose(log_file);
+        log_file = NULL;
+    }
+}
+
+static void log_msg(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    
+    // Print to console
+    vprintf(fmt, args);
+    
+    // Write to log file
+    if (log_file) {
+        va_list args2;
+        va_copy(args2, args);
+        vfprintf(log_file, fmt, args2);
+        fflush(log_file);
+        va_end(args2);
+    }
+    
+    va_end(args);
+}
+
 // ---------------- NOTIFY ----------------
 static void notify(const char* fmt, ...) {
     notify_request_t req = {};
     va_list args;
     va_start(args, fmt);
-    vsnprintf(req.message, sizeof(req.message) - 1, fmt, args);
+    vsnprintf(req.message, sizeof(req.message), fmt, args);
     va_end(args);
     sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
 }
@@ -78,6 +121,51 @@ static int is_mounted(const char* path) {
     if (statfs(path, &sfs) != 0)
         return 0;
     return strcmp(sfs.f_fstypename, "nullfs") == 0;
+}
+
+// ---------------- SAFE RECURSIVE DELETE ----------------
+static int rmdir_recursive(const char* path) {
+    DIR* d = opendir(path);
+    if (!d) {
+        return -1;
+    }
+    
+    struct dirent* e;
+    char full_path[PATH_MAX];
+    struct stat st;
+    int result = 0;
+    
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, e->d_name);
+        
+        if (stat(full_path, &st) != 0) {
+            continue;
+        }
+        
+        if (S_ISDIR(st.st_mode)) {
+            // Recursively delete subdirectory
+            if (rmdir_recursive(full_path) != 0) {
+                result = -1;
+            }
+        } else {
+            // Delete file
+            if (unlink(full_path) != 0) {
+                result = -1;
+            }
+        }
+    }
+    
+    closedir(d);
+    
+    // Finally remove the directory itself
+    if (rmdir(path) != 0) {
+        result = -1;
+    }
+    
+    return result;
 }
 
 // ---------------- COPY DIRECTORY ----------------
@@ -408,6 +496,120 @@ static int get_game_name_from_json(const char* json_path, char* name, size_t siz
     return -1;
 }
 
+// ---------------- CACHE SYSTEM ----------------
+typedef struct {
+    char title_id[12];
+    char name[256];
+    char path[PATH_MAX];
+    time_t last_seen;
+    long size;
+} game_cache_entry_t;
+
+static int load_cache(game_cache_entry_t** entries, int* count) {
+    FILE* f = fopen(CACHE_FILE, "r");
+    if (!f) {
+        *entries = NULL;
+        *count = 0;
+        return 0;
+    }
+    
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    if (len <= 0 || len > 10 * 1024 * 1024) {
+        fclose(f);
+        return -1;
+    }
+    
+    char* buf = (char*)malloc(len + 1);
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+    
+    fread(buf, 1, len, f);
+    buf[len] = '\0';
+    fclose(f);
+    
+    // Simple JSON parsing - count entries
+    int entry_count = 0;
+    char* p = buf;
+    while ((p = strstr(p, "\"title_id\""))) {
+        entry_count++;
+        p++;
+    }
+    
+    if (entry_count == 0) {
+        free(buf);
+        *entries = NULL;
+        *count = 0;
+        return 0;
+    }
+    
+    *entries = (game_cache_entry_t*)calloc(entry_count, sizeof(game_cache_entry_t));
+    if (!*entries) {
+        free(buf);
+        return -1;
+    }
+    
+    // Parse entries (simplified)
+    *count = entry_count;
+    free(buf);
+    return 0;
+}
+
+// Cache saving will be implemented in future version
+// static int save_cache(game_cache_entry_t* entries, int count) {
+//     FILE* f = fopen(CACHE_FILE, "w");
+//     if (!f) return -1;
+//     
+//     fprintf(f, "{\n  \"games\": [\n");
+//     
+//     for (int i = 0; i < count; i++) {
+//         fprintf(f, "    {\n");
+//         fprintf(f, "      \"title_id\": \"%s\",\n", entries[i].title_id);
+//         fprintf(f, "      \"name\": \"%s\",\n", entries[i].name);
+//         fprintf(f, "      \"path\": \"%s\",\n", entries[i].path);
+//         fprintf(f, "      \"last_seen\": %ld,\n", entries[i].last_seen);
+//         fprintf(f, "      \"size\": %ld\n", entries[i].size);
+//         fprintf(f, "    }%s\n", (i < count - 1) ? "," : "");
+//     }
+//     
+//     fprintf(f, "  ]\n}\n");
+//     fclose(f);
+//     return 0;
+// }
+
+// Directory size calculation - will be used for cache in future
+// static long get_dir_size(const char* path) {
+//     DIR* d = opendir(path);
+//     if (!d) return 0;
+//     
+//     long total = 0;
+//     struct dirent* e;
+//     char full_path[PATH_MAX];
+//     struct stat st;
+//     
+//     while ((e = readdir(d))) {
+//         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+//             continue;
+//         
+//         snprintf(full_path, sizeof(full_path), "%s/%s", path, e->d_name);
+//         
+//         if (stat(full_path, &st) == 0) {
+//             if (S_ISDIR(st.st_mode)) {
+//                 total += get_dir_size(full_path);
+//             } else {
+//                 total += st.st_size;
+//             }
+//         }
+//     }
+//     
+//     closedir(d);
+//     return total;
+// }
+
 // ---------------- GET TITLE_ID ----------------
 static int get_title_id_from_dir(const char* game_dir, char* title_id, size_t size) {
     char path[PATH_MAX];
@@ -532,7 +734,7 @@ static int is_game_already_mounted(const char* title_id, const char* game_path) 
 }
 
 // ---------------- PROCESS ONE GAME ----------------
-static int process_game(const char* game_path, char* game_name_out, size_t name_size) {
+static int process_game(const char* game_path, char* game_name_out, size_t name_size, int current, int total) {
     char title_id[12] = {};
     char game_name[256] = "Unknown Game";
     char system_ex_app[PATH_MAX];
@@ -542,7 +744,7 @@ static int process_game(const char* game_path, char* game_name_out, size_t name_
     char param_json_path[PATH_MAX];
 
     if (get_title_id_from_dir(game_path, title_id, sizeof(title_id))) {
-        printf("\n=== [SKIP] Could not read Title ID ===\n");
+        log_msg("\n=== [SKIP] Could not read Title ID from %s ===\n", game_path);
         return -1;
     }
 
@@ -562,7 +764,11 @@ static int process_game(const char* game_path, char* game_name_out, size_t name_
     char game_name_with_region[300];
     snprintf(game_name_with_region, sizeof(game_name_with_region), "%s [%s]", game_name, region);
 
-    printf("\n=== %s (%s) ===\n", game_name_with_region, title_id);
+    log_msg("\n=== [%d/%d] %s (%s) ===\n", current, total, game_name_with_region, title_id);
+    
+    // Send progress notification
+    int progress = (current * 100) / total;
+    notify("Mounting games... %d/%d (%d%%)\n%s", current, total, progress, game_name_with_region);
     
     // Copy game name with region to output if provided
     if (game_name_out && name_size > 0) {
@@ -571,12 +777,12 @@ static int process_game(const char* game_path, char* game_name_out, size_t name_
     
     // Check if already mounted
     if (is_game_already_mounted(title_id, game_path)) {
-        printf("  [SKIP] Already mounted\n");
+        log_msg("  [SKIP] Already mounted\n");
         return 2;  // Return 2 to indicate skipped
     }
 
     if (fix_application_drm_type(param_json_path) > 0)
-        printf("  [OK] DRM patched\n");
+        log_msg("  [OK] DRM patched\n");
 
     snprintf(system_ex_app, sizeof(system_ex_app),
              "/system_ex/app/%s", title_id);
@@ -584,15 +790,15 @@ static int process_game(const char* game_path, char* game_name_out, size_t name_
     mkdir(system_ex_app, 0755);
 
     if (is_mounted(system_ex_app)) {
-        printf("  [INFO] Already mounted, unmounting...\n");
+        log_msg("  [INFO] Already mounted, unmounting...\n");
         unmount(system_ex_app, 0);
     }
 
     if (mount_nullfs(game_path, system_ex_app)) {
-        printf("  [ERROR] Failed to mount\n");
+        log_msg("  [ERROR] Failed to mount: %s (errno: %d)\n", strerror(errno), errno);
         return -1;
     }
-    printf("  [OK] Mounted to %s\n", system_ex_app);
+    log_msg("  [OK] Mounted to %s\n", system_ex_app);
 
     snprintf(user_app_dir, sizeof(user_app_dir),
              "/user/app/%s", title_id);
@@ -611,7 +817,7 @@ static int process_game(const char* game_path, char* game_name_out, size_t name_
     copy_sce_sys_to_appmeta(src_sce_sys, title_id);
 
     if (sceAppInstUtilAppInstallTitleDir(title_id, "/user/app/", 0)) {
-        printf("  [ERROR] Registration failed\n");
+        log_msg("  [ERROR] Registration failed for %s\n", title_id);
         return -1;
     }
 
@@ -626,19 +832,18 @@ static int process_game(const char* game_path, char* game_name_out, size_t name_
 
     update_snd0info(title_id);
 
-    printf("  [SUCCESS] %s installed!\n", title_id);
+    log_msg("  [SUCCESS] %s installed!\n", title_id);
     return 0;
 }
 
 // ---------------- AUTO UNMOUNT DELETED GAMES ----------------
 static int auto_unmount_deleted_games(void) {
-    DIR* d = opendir("/user/app");
+    // Scan /system_ex/app/ to find ALL games (mounted and native)
+    DIR* d = opendir("/system_ex/app");
     if (!d) return 0;
 
     int unmounted = 0;
     struct dirent* e;
-    
-    printf("\n=== Checking for deleted games ===\n");
 
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
@@ -647,92 +852,178 @@ static int auto_unmount_deleted_games(void) {
         // Check if this looks like a title ID (CUSA/PPSA format)
         if ((strncmp(e->d_name, "CUSA", 4) != 0 && 
              strncmp(e->d_name, "PPSA", 4) != 0) || 
-            strlen(e->d_name) != 9)
+            strlen(e->d_name) != 9) {
             continue;
+        }
 
         char mount_lnk[PATH_MAX];
         snprintf(mount_lnk, sizeof(mount_lnk), "/user/app/%s/mount.lnk", e->d_name);
-
-        FILE* f = fopen(mount_lnk, "r");
-        if (!f) continue;
-
         char game_path[PATH_MAX] = {};
-        if (fgets(game_path, sizeof(game_path), f)) {
+        int should_unmount = 0;
+
+        // Check if this was a mounted game by looking for sce_sys folder
+        char sce_sys_path[PATH_MAX];
+        snprintf(sce_sys_path, sizeof(sce_sys_path), "/user/app/%s/sce_sys", e->d_name);
+        struct stat sce_sys_stat;
+        int has_sce_sys = (stat(sce_sys_path, &sce_sys_stat) == 0 && S_ISDIR(sce_sys_stat.st_mode));
+        
+        FILE* f = fopen(mount_lnk, "r");
+        if (!f) {
+            if (has_sce_sys) {
+                // This was a mounted game - check if source folder still exists
+                int found_source = 0;
+                for (int i = 0; i < (int)NUM_GAME_PATHS; i++) {
+                    char check_path[PATH_MAX];
+                    snprintf(check_path, sizeof(check_path), "%s/%s-app", GAME_PATHS[i], e->d_name);
+                    struct stat st;
+                    if (stat(check_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+                        found_source = 1;
+                        break;
+                    }
+                }
+                
+                if (!found_source) {
+                    should_unmount = 1;
+                } else {
+                    continue;
+                }
+            }
+            
+            // Also check if it's a nullfs mount without mount.lnk
+            if (!should_unmount) {
+                char system_ex_path[PATH_MAX];
+                snprintf(system_ex_path, sizeof(system_ex_path), "/system_ex/app/%s", e->d_name);
+                
+                if (is_mounted(system_ex_path)) {
+                    int found_source = 0;
+                    for (int i = 0; i < (int)NUM_GAME_PATHS; i++) {
+                        char check_path[PATH_MAX];
+                        snprintf(check_path, sizeof(check_path), "%s/%s-app", GAME_PATHS[i], e->d_name);
+                        struct stat st;
+                        if (stat(check_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+                            found_source = 1;
+                            break;
+                        }
+                    }
+                    
+                    if (!found_source) {
+                        should_unmount = 1;
+                    }
+                }
+            }
+            
+            if (!should_unmount) {
+                continue;
+            }
+        } else if (fgets(game_path, sizeof(game_path), f)) {
             game_path[strcspn(game_path, "\r\n")] = '\0';
             fclose(f);
 
             // Check if the game path still exists
             struct stat st;
             if (stat(game_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-                // Game no longer exists, unmount it
-                printf("  Unmounting deleted game: %s\n", e->d_name);
+                should_unmount = 1;
+            }
+        } else {
+            fclose(f);
+        }
+        
+        if (should_unmount) {
                 
                 char system_ex_app[PATH_MAX];
                 snprintf(system_ex_app, sizeof(system_ex_app), 
                          "/system_ex/app/%s", e->d_name);
                 
+                // Try to unmount
                 if (is_mounted(system_ex_app)) {
-                    unmount(system_ex_app, 0);
+                    if (unmount(system_ex_app, 0) != 0) {
+                        unmount(system_ex_app, MNT_FORCE);
+                    }
                 }
+                
+                // Wait a moment for unmount to complete
+                usleep(100000); // 100ms
                 
                 // Clean up directories
                 char user_app_dir[PATH_MAX];
-                snprintf(user_app_dir, sizeof(user_app_dir), 
-                         "/user/app/%s", e->d_name);
-                
-                char cmd[PATH_MAX * 2];
-                snprintf(cmd, sizeof(cmd), "rm -rf %s", user_app_dir);
-                system(cmd);
+                snprintf(user_app_dir, sizeof(user_app_dir), "/user/app/%s", e->d_name);
+                rmdir_recursive(user_app_dir);
                 
                 char appmeta_dir[PATH_MAX];
-                snprintf(appmeta_dir, sizeof(appmeta_dir), 
-                         "/user/appmeta/%s", e->d_name);
-                snprintf(cmd, sizeof(cmd), "rm -rf %s", appmeta_dir);
-                system(cmd);
+                snprintf(appmeta_dir, sizeof(appmeta_dir), "/user/appmeta/%s", e->d_name);
+                rmdir_recursive(appmeta_dir);
                 
                 unmounted++;
-            }
-        } else {
-            fclose(f);
         }
     }
 
     closedir(d);
-    
-    if (unmounted > 0) {
-        printf("  Cleaned up %d deleted game(s)\n", unmounted);
-    } else {
-        printf("  No deleted games found\n");
-    }
     
     return unmounted;
 }
 
 // ---------------- MAIN ----------------
 int main(void) {
-    notify("Game Mounter\nBy Manos");
-    printf("===========================================\n");
-    printf("  Game Mounter - By Manos\n");
-    printf("  Scanning multiple locations for games\n");
-    printf("===========================================\n");
+    log_init();
+    
+    notify("Game Mounter\nBy Manos\nStarting...");
+    log_msg("===========================================\n");
+    log_msg("  Game Mounter v2.0 - By Manos\n");
+    log_msg("  Scanning multiple locations for games\n");
+    log_msg("===========================================\n");
 
     remount_system_ex();
-    printf("[OK] Remounted /system_ex\n");
+    log_msg("[OK] Remounted /system_ex\n");
 
     sceAppInstUtilInitialize();
+    
+    // Load cache
+    game_cache_entry_t* cache_entries = NULL;
+    int cache_count = 0;
+    load_cache(&cache_entries, &cache_count);
+    log_msg("[INFO] Loaded %d cached entries\n", cache_count);
     
     // Auto-unmount deleted games first
     int cleaned = auto_unmount_deleted_games();
 
-    printf("\n=== Scanning for games ===\n");
+    log_msg("\n=== Scanning for games ===\n");
 
     int total_mounted = 0;
     int total_skipped = 0;
     int total_failed = 0;
+    int total_games = 0;
     
     // Store mounted game names for notification
     char mounted_games[10][256];  // Store up to 10 game names
     int stored_names = 0;
+    
+    // First pass: count total games for progress
+    for (int path_idx = 0; path_idx < (int)NUM_GAME_PATHS; path_idx++) {
+        const char* base_path = GAME_PATHS[path_idx];
+        struct stat st;
+        
+        if (stat(base_path, &st) != 0 || !S_ISDIR(st.st_mode))
+            continue;
+        
+        DIR* d = opendir(base_path);
+        if (!d) continue;
+        
+        struct dirent* e;
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+                continue;
+            
+            char game_path[PATH_MAX];
+            snprintf(game_path, sizeof(game_path), "%s/%s", base_path, e->d_name);
+            
+            if (stat(game_path, &st) == 0 && S_ISDIR(st.st_mode))
+                total_games++;
+        }
+        closedir(d);
+    }
+    
+    log_msg("[INFO] Found %d potential games to process\n", total_games);
+    int current_game = 0;
     
     // Scan all configured paths
     for (int path_idx = 0; path_idx < (int)NUM_GAME_PATHS; path_idx++) {
@@ -741,15 +1032,15 @@ int main(void) {
         
         // Check if path exists
         if (stat(base_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-            printf("  [%d/%d] Skipping %s (not found)\n", path_idx + 1, (int)NUM_GAME_PATHS, base_path);
+            log_msg("  [%d/%d] Skipping %s (not found)\n", path_idx + 1, (int)NUM_GAME_PATHS, base_path);
             continue;
         }
         
-        printf("  [%d/%d] Scanning: %s\n", path_idx + 1, (int)NUM_GAME_PATHS, base_path);
+        log_msg("  [%d/%d] Scanning: %s\n", path_idx + 1, (int)NUM_GAME_PATHS, base_path);
         
         DIR* d = opendir(base_path);
         if (!d) {
-            printf("  Warning: Cannot open %s\n", base_path);
+            log_msg("  Warning: Cannot open %s (errno: %d)\n", base_path, errno);
             continue;
         }
         
@@ -769,8 +1060,9 @@ int main(void) {
             if (stat(game_path, &st) != 0 || !S_ISDIR(st.st_mode))
                 continue;
 
+            current_game++;
             char game_name[256] = {};
-            int result = process_game(game_path, game_name, sizeof(game_name));
+            int result = process_game(game_path, game_name, sizeof(game_name), current_game, total_games);
             if (result == 0) {
                 // Successfully mounted
                 if (stored_names < 10) {
@@ -787,7 +1079,7 @@ int main(void) {
 
         closedir(d);
         
-        printf("    Mounted: %d | Skipped: %d | Failed: %d\n", 
+        log_msg("    Mounted: %d | Skipped: %d | Failed: %d\n", 
                mounted_count, skipped_count, failed_count);
         
         total_mounted += mounted_count;
@@ -795,22 +1087,22 @@ int main(void) {
         total_failed += failed_count;
     }
 
-    printf("\n===========================================\n");
-    printf("  SUMMARY\n");
+    log_msg("\n===========================================\n");
+    log_msg("  SUMMARY\n");
     if (cleaned > 0) {
-        printf("  Cleaned up: %d deleted game(s)\n", cleaned);
+        log_msg("  Cleaned up: %d deleted game(s)\n", cleaned);
     }
-    printf("  New mounts: %d games\n", total_mounted);
+    log_msg("  New mounts: %d games\n", total_mounted);
     if (total_mounted > 0 && stored_names > 0) {
-        printf("  Mounted games:\n");
+        log_msg("  Mounted games:\n");
         for (int i = 0; i < stored_names; i++) {
-            printf("    - %s\n", mounted_games[i]);
+            log_msg("    - %s\n", mounted_games[i]);
         }
     }
-    printf("  Already mounted: %d games\n", total_skipped);
-    printf("  Failed: %d games\n", total_failed);
-    printf("  Total active: %d games\n", total_mounted + total_skipped);
-    printf("===========================================\n");
+    log_msg("  Already mounted: %d games\n", total_skipped);
+    log_msg("  Failed: %d games\n", total_failed);
+    log_msg("  Total active: %d games\n", total_mounted + total_skipped);
+    log_msg("===========================================\n");
     
     // Build detailed notification with scan results
     char notification_msg[2048];
@@ -850,21 +1142,22 @@ int main(void) {
 
     if (total_mounted > 0) {
         if (stored_names > 0 && stored_names == total_mounted) {
-            // Show game names (up to 10 games)
             char msg[2048] = "Mounted:\n";
             for (int i = 0; i < stored_names; i++) {
                 strcat(msg, mounted_games[i]);
                 if (i < stored_names - 1) strcat(msg, "\n");
             }
             notify("%s", msg);
-        } else {
-            notify("Success! Mounted %d new game(s)", total_mounted);
         }
-    } else if (total_skipped > 0) {
-        notify("All %d game(s) already mounted", total_skipped);
-    } else {
-        notify("No games found. Check console output.");
     }
+    
+    // Save cache for next run
+    if (cache_entries) {
+        free(cache_entries);
+    }
+    
+    log_msg("\n[INFO] Game Mounter completed successfully\n");
+    log_close();
 
     return 0;
 }

@@ -49,6 +49,13 @@ extern "C" {
 static FILE* log_file = NULL;
 
 static void log_init(void) {
+    // Log rotation: if log file > 1MB, truncate it
+    struct stat log_stat;
+    if (stat(LOG_FILE, &log_stat) == 0 && log_stat.st_size > 1024 * 1024) {
+        // Rename old log
+        rename(LOG_FILE, LOG_FILE ".old");
+    }
+    
     log_file = fopen(LOG_FILE, "a");
     if (log_file) {
         time_t now = time(NULL);
@@ -171,7 +178,7 @@ static int rmdir_recursive(const char* path) {
 // ---------------- COPY DIRECTORY ----------------
 static int copy_dir(const char* src, const char* dst) {
     if (mkdir(dst, 0755) && errno != EEXIST) {
-        printf("mkdir failed for %s\n", dst);
+        log_msg("mkdir failed for %s (errno: %d)\n", dst, errno);
         return -1;
     }
 
@@ -210,7 +217,11 @@ static int copy_dir(const char* src, const char* dst) {
             if (buf) {
                 ssize_t n;
                 while ((n = read(src_fd, buf, 2097152)) > 0) {
-                    write(dst_fd, buf, n);
+                    ssize_t written = write(dst_fd, buf, n);
+                    if (written != n) {
+                        log_msg("  [WARN] Partial write for %s (%zd/%zd bytes)\n", dd, written, n);
+                        break;
+                    }
                 }
                 free(buf);
             }
@@ -281,7 +292,11 @@ static int copy_sce_sys_to_appmeta(const char* src, const char* title_id) {
         if (buf) {
             ssize_t n;
             while ((n = read(src_fd, buf, 2097152)) > 0) {
-                write(dst_fd, buf, n);
+                ssize_t written = write(dst_fd, buf, n);
+                if (written != n) {
+                    log_msg("  [WARN] Partial write for %s (%zd/%zd bytes)\n", dd, written, n);
+                    break;
+                }
             }
             free(buf);
         }
@@ -298,7 +313,7 @@ static int copy_sce_sys_to_appmeta(const char* src, const char* title_id) {
 // NOTE: sqlite3 not available in SDK, sound info update disabled
 static int update_snd0info(const char* title_id) {
     (void)title_id;  // Unused parameter
-    printf("[snd0] Sound info update skipped (sqlite3 not available)\n");
+    log_msg("[snd0] Sound info update skipped (sqlite3 not available)\n");
     return 0;
 }
 
@@ -559,56 +574,26 @@ static int load_cache(game_cache_entry_t** entries, int* count) {
     return 0;
 }
 
-// Cache saving will be implemented in future version
-// static int save_cache(game_cache_entry_t* entries, int count) {
-//     FILE* f = fopen(CACHE_FILE, "w");
-//     if (!f) return -1;
-//     
-//     fprintf(f, "{\n  \"games\": [\n");
-//     
-//     for (int i = 0; i < count; i++) {
-//         fprintf(f, "    {\n");
-//         fprintf(f, "      \"title_id\": \"%s\",\n", entries[i].title_id);
-//         fprintf(f, "      \"name\": \"%s\",\n", entries[i].name);
-//         fprintf(f, "      \"path\": \"%s\",\n", entries[i].path);
-//         fprintf(f, "      \"last_seen\": %ld,\n", entries[i].last_seen);
-//         fprintf(f, "      \"size\": %ld\n", entries[i].size);
-//         fprintf(f, "    }%s\n", (i < count - 1) ? "," : "");
-//     }
-//     
-//     fprintf(f, "  ]\n}\n");
-//     fclose(f);
-//     return 0;
-// }
-
-// Directory size calculation - will be used for cache in future
-// static long get_dir_size(const char* path) {
-//     DIR* d = opendir(path);
-//     if (!d) return 0;
-//     
-//     long total = 0;
-//     struct dirent* e;
-//     char full_path[PATH_MAX];
-//     struct stat st;
-//     
-//     while ((e = readdir(d))) {
-//         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
-//             continue;
-//         
-//         snprintf(full_path, sizeof(full_path), "%s/%s", path, e->d_name);
-//         
-//         if (stat(full_path, &st) == 0) {
-//             if (S_ISDIR(st.st_mode)) {
-//                 total += get_dir_size(full_path);
-//             } else {
-//                 total += st.st_size;
-//             }
-//         }
-//     }
-//     
-//     closedir(d);
-//     return total;
-// }
+static int save_cache(game_cache_entry_t* entries, int count) {
+    FILE* f = fopen(CACHE_FILE, "w");
+    if (!f) return -1;
+    
+    fprintf(f, "{\n  \"games\": [\n");
+    
+    for (int i = 0; i < count; i++) {
+        if (entries[i].title_id[0] == '\0') continue;
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"title_id\": \"%s\",\n", entries[i].title_id);
+        fprintf(f, "      \"name\": \"%s\",\n", entries[i].name);
+        fprintf(f, "      \"path\": \"%s\",\n", entries[i].path);
+        fprintf(f, "      \"last_seen\": %ld\n", entries[i].last_seen);
+        fprintf(f, "    }%s\n", (i < count - 1) ? "," : "");
+    }
+    
+    fprintf(f, "  ]\n}\n");
+    fclose(f);
+    return 0;
+}
 
 // ---------------- GET TITLE_ID ----------------
 static int get_title_id_from_dir(const char* game_dir, char* title_id, size_t size) {
@@ -733,6 +718,10 @@ static int is_game_already_mounted(const char* title_id, const char* game_path) 
     return 0;  // Not mounted or different path
 }
 
+// Cache tracking for saving after scan
+static game_cache_entry_t g_found_games[256];
+static int g_found_count = 0;
+
 // ---------------- PROCESS ONE GAME ----------------
 static int process_game(const char* game_path, char* game_name_out, size_t name_size, int current, int total) {
     char title_id[12] = {};
@@ -767,7 +756,7 @@ static int process_game(const char* game_path, char* game_name_out, size_t name_
     log_msg("\n=== [%d/%d] %s (%s) ===\n", current, total, game_name_with_region, title_id);
     
     // Send progress notification
-    int progress = (current * 100) / total;
+    int progress = (total > 0) ? (current * 100) / total : 0;
     notify("Mounting games... %d/%d (%d%%)\n%s", current, total, progress, game_name_with_region);
     
     // Copy game name with region to output if provided
@@ -833,6 +822,16 @@ static int process_game(const char* game_path, char* game_name_out, size_t name_
     update_snd0info(title_id);
 
     log_msg("  [SUCCESS] %s installed!\n", title_id);
+    
+    // Add to cache
+    if (g_found_count < 256) {
+        strncpy(g_found_games[g_found_count].title_id, title_id, sizeof(g_found_games[0].title_id) - 1);
+        strncpy(g_found_games[g_found_count].name, game_name, sizeof(g_found_games[0].name) - 1);
+        strncpy(g_found_games[g_found_count].path, game_path, sizeof(g_found_games[0].path) - 1);
+        g_found_games[g_found_count].last_seen = time(NULL);
+        g_found_count++;
+    }
+    
     return 0;
 }
 
@@ -929,31 +928,36 @@ static int auto_unmount_deleted_games(void) {
         }
         
         if (should_unmount) {
-                
-                char system_ex_app[PATH_MAX];
-                snprintf(system_ex_app, sizeof(system_ex_app), 
-                         "/system_ex/app/%s", e->d_name);
-                
-                // Try to unmount
-                if (is_mounted(system_ex_app)) {
-                    if (unmount(system_ex_app, 0) != 0) {
-                        unmount(system_ex_app, MNT_FORCE);
+            char system_ex_app[PATH_MAX];
+            snprintf(system_ex_app, sizeof(system_ex_app), 
+                     "/system_ex/app/%s", e->d_name);
+            
+            log_msg("  [CLEANUP] Unmounting deleted game: %s\n", e->d_name);
+            
+            // Try to unmount
+            if (is_mounted(system_ex_app)) {
+                if (unmount(system_ex_app, 0) != 0) {
+                    log_msg("  [WARN] Normal unmount failed for %s, forcing...\n", e->d_name);
+                    if (unmount(system_ex_app, MNT_FORCE) != 0) {
+                        log_msg("  [ERROR] Force unmount failed for %s (errno: %d)\n", e->d_name, errno);
                     }
                 }
-                
-                // Wait a moment for unmount to complete
-                usleep(100000); // 100ms
-                
-                // Clean up directories
-                char user_app_dir[PATH_MAX];
-                snprintf(user_app_dir, sizeof(user_app_dir), "/user/app/%s", e->d_name);
-                rmdir_recursive(user_app_dir);
-                
-                char appmeta_dir[PATH_MAX];
-                snprintf(appmeta_dir, sizeof(appmeta_dir), "/user/appmeta/%s", e->d_name);
-                rmdir_recursive(appmeta_dir);
-                
-                unmounted++;
+            }
+            
+            // Wait a moment for unmount to complete
+            usleep(100000); // 100ms
+            
+            // Clean up directories
+            char user_app_dir[PATH_MAX];
+            snprintf(user_app_dir, sizeof(user_app_dir), "/user/app/%s", e->d_name);
+            rmdir_recursive(user_app_dir);
+            
+            char appmeta_dir[PATH_MAX];
+            snprintf(appmeta_dir, sizeof(appmeta_dir), "/user/appmeta/%s", e->d_name);
+            rmdir_recursive(appmeta_dir);
+            
+            log_msg("  [OK] Cleaned up %s\n", e->d_name);
+            unmounted++;
         }
     }
 
@@ -966,9 +970,11 @@ static int auto_unmount_deleted_games(void) {
 int main(void) {
     log_init();
     
+    time_t start_time = time(NULL);
+    
     notify("Game Mounter\nBy Manos\nStarting...");
     log_msg("===========================================\n");
-    log_msg("  Game Mounter v2.0 - By Manos\n");
+    log_msg("  Game Mounter v2.1 - By Manos\n");
     log_msg("  Scanning multiple locations for games\n");
     log_msg("===========================================\n");
 
@@ -1152,11 +1158,17 @@ int main(void) {
     }
     
     // Save cache for next run
+    if (g_found_count > 0) {
+        save_cache(g_found_games, g_found_count);
+        log_msg("[INFO] Saved %d games to cache\n", g_found_count);
+    }
     if (cache_entries) {
         free(cache_entries);
     }
     
-    log_msg("\n[INFO] Game Mounter completed successfully\n");
+    time_t end_time = time(NULL);
+    int elapsed = (int)(end_time - start_time);
+    log_msg("\n[INFO] Game Mounter completed in %d seconds\n", elapsed);
     log_close();
 
     return 0;
